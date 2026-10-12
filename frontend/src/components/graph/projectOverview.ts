@@ -6,6 +6,9 @@ const STRUCTURAL = new Set(['directory', 'file'])
 const HIDDEN_EDGES = new Set(['contains', 'imports'])
 const ENTRY_CAP = 80
 
+/** Not a snapshot entity. Architecture fit uses this so the camera is not pinned to one endpoint. */
+export const PROJECT_OVERVIEW_ROOT_ID = 'project-overview'
+
 function toNode(entity: EntitySummary): GraphNode {
   return {
     id: entity.id,
@@ -105,10 +108,9 @@ export async function loadProjectOverview(
 
   const keptEdges = [...edges.values()].filter((edge) => nodes.has(edge.source) && nodes.has(edge.target))
   const nodeList = [...nodes.values()].sort((a, b) => a.qualified_name.localeCompare(b.qualified_name) || a.id.localeCompare(b.id))
-  const root = entries[0]?.id ?? nodeList[0]?.id ?? ''
   return {
     snapshot_id: snapshotId,
-    root_id: root,
+    root_id: PROJECT_OVERVIEW_ROOT_ID,
     view: 'neighborhood',
     nodes: nodeList,
     edges: keptEdges,
