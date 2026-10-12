@@ -101,12 +101,8 @@ def test_session_rejects_missing_token_bad_origin_and_remote_host() -> None:
     headers = {"host": "127.0.0.1", "x-rkg-session": TOKEN}
     assert mutation_allowed(headers, TOKEN)
     assert not mutation_allowed({"host": "127.0.0.1"}, TOKEN)
-    assert not mutation_allowed(
-        {"host": "127.0.0.1", "x-rkg-session": "nope"}, TOKEN
-    )
-    assert not mutation_allowed(
-        {**headers, "origin": "http://evil.example"}, TOKEN
-    )
+    assert not mutation_allowed({"host": "127.0.0.1", "x-rkg-session": "nope"}, TOKEN)
+    assert not mutation_allowed({**headers, "origin": "http://evil.example"}, TOKEN)
     assert not mutation_allowed({**headers, "host": "10.1.1.1"}, TOKEN)
 
 
@@ -327,9 +323,7 @@ def test_graph_reads_context_and_snapshot_guards(api) -> None:
     )
     second = "snap-cycle-2"
     publish_fact_batch(storage, cycle_batch(repo_id, second), publish_meta())
-    hidden = client.get(
-        f"/api/v1/repositories/{other.id}/snapshots/{snapshot_id}"
-    )
+    hidden = client.get(f"/api/v1/repositories/{other.id}/snapshots/{snapshot_id}")
     assert hidden.status_code == 404
     assert hidden.json()["error"]["code"] == "not_found"
     assert "Cycle" not in hidden.text
@@ -389,9 +383,7 @@ def test_graph_reads_context_and_snapshot_guards(api) -> None:
     assert empty.status_code == 409
     assert empty.json()["error"]["code"] == "no_active_snapshot"
     mark_snapshot_unavailable(storage, snapshot_id)
-    stale = client.get(
-        f"/api/v1/entities/{root}", params={"snapshot_id": snapshot_id}
-    )
+    stale = client.get(f"/api/v1/entities/{root}", params={"snapshot_id": snapshot_id})
     assert stale.status_code == 410
     assert stale.json()["error"]["code"] == "snapshot_unavailable"
     budgets = client.post(
@@ -401,9 +393,7 @@ def test_graph_reads_context_and_snapshot_guards(api) -> None:
     )
     assert budgets.status_code == 422
     assert budgets.json()["error"]["code"] == "invalid_budget"
-    detail = client.get(
-        f"/api/v1/repositories/{repo_id}/snapshots/{second}"
-    )
+    detail = client.get(f"/api/v1/repositories/{repo_id}/snapshots/{second}")
     assert detail.status_code == 200
     assert detail.json()["source_revision"].startswith("manifest:")
     assert detail.json()["manifest_hash"]
@@ -413,13 +403,9 @@ def test_graph_reads_context_and_snapshot_guards(api) -> None:
     assert isinstance(detail.json()["adapter_versions"], dict)
     assert detail.json()["is_active"] is True
     assert detail.json()["metrics"]["entity_count"] >= 1
-    diagnostics = client.get(
-        "/api/v1/diagnostics", params={"snapshot_id": second}
-    )
+    diagnostics = client.get("/api/v1/diagnostics", params={"snapshot_id": second})
     assert diagnostics.status_code == 200
-    dependencies = client.get(
-        "/api/v1/dependencies", params={"snapshot_id": second}
-    )
+    dependencies = client.get("/api/v1/dependencies", params={"snapshot_id": second})
     assert dependencies.status_code == 200
     create_conversation(
         storage, repository_id=repo_id, snapshot_id=snapshot_id, title="pinned"
@@ -437,9 +423,7 @@ def test_graph_reads_context_and_snapshot_guards(api) -> None:
     assert active_delete.status_code == 409
     assert active_delete.json()["error"]["code"] == "snapshot_active"
     kept = client.get(f"/api/v1/repositories/{repo_id}")
-    jobs_before = fetch_one(
-        storage.conn, "MATCH (j:Job) RETURN count(j)", None
-    )[0]
+    jobs_before = fetch_one(storage.conn, "MATCH (j:Job) RETURN count(j)", None)[0]
     activated = client.post(
         f"/api/v1/repositories/{repo_id}/snapshots/{snapshot_id}/activate",
         headers=_auth(),
@@ -469,19 +453,13 @@ def test_conversation_delete_is_busy_while_a_turn_is_pending(api) -> None:
     )
     denied = client.delete(f"/api/v1/conversations/{conversation.id}")
     assert denied.status_code == 401
-    blocked = client.delete(
-        f"/api/v1/conversations/{conversation.id}", headers=_auth()
-    )
+    blocked = client.delete(f"/api/v1/conversations/{conversation.id}", headers=_auth())
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "conversation_busy"
     recover_pending_turns(storage.conn)
-    removed = client.delete(
-        f"/api/v1/conversations/{conversation.id}", headers=_auth()
-    )
+    removed = client.delete(f"/api/v1/conversations/{conversation.id}", headers=_auth())
     assert removed.status_code == 204
-    missing = client.delete(
-        f"/api/v1/conversations/{conversation.id}", headers=_auth()
-    )
+    missing = client.delete(f"/api/v1/conversations/{conversation.id}", headers=_auth())
     assert missing.status_code == 404
 
 
@@ -533,9 +511,7 @@ def test_unreferenced_snapshot_and_repository_delete(api) -> None:
     assert removed.status_code == 204
     listed = client.get(f"/api/v1/repositories/{repo_id}/snapshots")
     assert [item["snapshot_id"] for item in listed.json()["items"]] == [second]
-    gone = client.get(
-        f"/api/v1/repositories/{repo_id}/snapshots/{snapshot_id}"
-    )
+    gone = client.get(f"/api/v1/repositories/{repo_id}/snapshots/{snapshot_id}")
     assert gone.status_code == 404
     kept = client.get(f"/api/v1/repositories/{other.id}/snapshots")
     assert kept.status_code == 200
@@ -581,11 +557,9 @@ def test_serve_binds_fastapi_on_loopback(tmp_path, monkeypatch, capsys) -> None:
         captured["status"] = client.get("/api/v1/repositories").status_code
 
     monkeypatch.setattr("rkg.cli.uvicorn.run", fake_run)
-    assert (
-        main(["--db", str(tmp_path / "graph"), "serve", "--host", "127.0.0.1"]) == 0
-    )
+    assert main(["--db", str(tmp_path / "graph"), "serve", "--host", "127.0.0.1"]) == 0
     assert captured["kwargs"]["host"] == "127.0.0.1"
-    assert captured["kwargs"]["access_log"] is False
+    assert captured["kwargs"].get("access_log", True) is True
     assert captured["kwargs"]["log_level"] == "info"
     assert captured["status"] == 200
     assert main(["--db", str(tmp_path / "graph"), "serve", "--workers", "2"]) == 1

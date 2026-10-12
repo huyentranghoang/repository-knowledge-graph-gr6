@@ -118,7 +118,7 @@ def test_exact_source_uses_cited_evidence_not_target_entity(graph):
         "end_line",
         "rule",
     }
-    assert client.get(route + "1").status_code == 404
+    assert client.get(route + str(len(result.json()["citations"]))).status_code == 404
     assert client.get(route + "-1").status_code == 422
     assert client.get(route + "not_an_index").status_code == 422
     other = create_conversation(

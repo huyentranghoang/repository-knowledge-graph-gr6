@@ -48,7 +48,9 @@ def _edge_pairs(batch, edge_type: EdgeType) -> set[tuple[str, str]]:
     return {
         (by_id[edge.source_id].qualified_name, by_id[edge.target_id].qualified_name)
         for edge in batch.edges
-        if edge.type == edge_type and edge.source_id in by_id and edge.target_id in by_id
+        if edge.type == edge_type
+        and edge.source_id in by_id
+        and edge.target_id in by_id
     }
 
 
@@ -373,7 +375,12 @@ func InvokeAmbiguous(worker ambiguousWorker) string { return worker.Work() }
     consumes = _edge_pairs(batch, EdgeType.CONSUMES)
     publishes = _edge_pairs(batch, EdgeType.PUBLISHES)
     assert ("messaging.NewKafkaReader", "orders.events") in consumes
-    assert ("messaging.EventPublisher.Publish", "orders.projection.updated") in publishes
+    assert ("app.Processor.Process", "orders.projection.updated") in publishes
+    assert ("positive.PublishProjection", "orders.projection.updated") in publishes
+    assert (
+        "messaging.EventPublisher.Publish",
+        "orders.projection.updated",
+    ) not in publishes
     assert not any("dynamic_topic" in src for src, _ in publishes)
     assert not any("package_level_publish" in src for src, _ in publishes)
     assert not any("shadowed_package" in src for src, _ in publishes)
@@ -454,6 +461,7 @@ func (r *PostgresRepository) DeleteOlderThan(ctx context.Context) error {
         "storage.PostgresRepository.DeleteOlderThan",
         "relational:commerce.order_projection",
     ) in writes
-    assert ("storage.PostgresRepository.FindByID", "storage.PgxDB.QueryRow") in _edge_pairs(
-        batch, EdgeType.CALLS
-    )
+    assert (
+        "storage.PostgresRepository.FindByID",
+        "storage.PgxDB.QueryRow",
+    ) in _edge_pairs(batch, EdgeType.CALLS)

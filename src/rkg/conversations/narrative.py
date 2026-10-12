@@ -65,11 +65,27 @@ def source_identity(entity: Entity, language: str) -> str | None:
         if isinstance(line, int) and not isinstance(line, bool) and line > 0
         else ""
     )
-    return (
-        f"{entity.name} nằm trong `{path}{position}`."
-        if language == "vi"
-        else f"{entity.name} is defined in `{path}{position}`."
+    end = entity.end_line
+    span = str(line) if position else ""
+    if position and isinstance(end, int) and not isinstance(end, bool) and end > line:
+        span += f"–{end}"
+    name = display_name(entity)
+    detail = (
+        (f", dòng {span}" if language == "vi" else f", lines {span}") if span else ""
     )
+    return (
+        f"{name} nằm trong `{path}{position}`{detail}."
+        if language == "vi"
+        else f"{name} is defined in `{path}{position}`{detail}."
+    )
+
+
+def display_name(entity: Entity) -> str:
+    """Preserve the declaring class, including when its method name is unique."""
+    parts = entity.qualified_name.split(".")
+    if entity.type.value == "Callable" and len(parts) > 1 and parts[-2][:1].isupper():
+        return ".".join(parts[-2:])
+    return entity.name
 
 
 def usable_evidence(context: ContextPackage) -> set[str]:
@@ -437,11 +453,18 @@ def render_narrative(
     counts = Counter(nodes[i].name for i in rendered_nodes if i in nodes)
 
     def base_label(entity: Entity) -> str:
+        if entity.type.value == "DataResource":
+            attrs = dict(entity.attributes)
+            namespace = attrs.get("namespace") or attrs.get("schema")
+            if namespace:
+                return f"{namespace}.{entity.name}"
         if entity.type.value == "Endpoint":
             attrs = dict(entity.attributes)
             if attrs.get("method") and attrs.get("path"):
                 return f"{attrs['method']} {attrs['path']}"
-        return entity.name if counts[entity.name] == 1 else entity.qualified_name
+        return (
+            display_name(entity) if counts[entity.name] == 1 else entity.qualified_name
+        )
 
     bases = Counter(base_label(nodes[i]) for i in rendered_nodes if i in nodes)
     if context.repository_id in rendered_nodes:
@@ -553,10 +576,97 @@ def render_narrative(
         add(connector)
         paragraphs.append(text(edges[connector]))
 
+    call_paths = [p for p in paths if p.relation == "calls"]
+    call_edges = {i: edges[i] for p in call_paths for i in p.edge_ids}
+    if call_paths:
+        for key in call_edges:
+            add(key)
+        direction = call_paths[0].direction
+        grouped_calls = {}
+        evidence = {e.id: e for e in context.evidence}
+        for edge in sorted(
+            call_edges.values(),
+            key=lambda e: (
+                e.source_id,
+                min(
+                    (
+                        evidence[i].start_line or 0
+                        for i in e.evidence_ids
+                        if i in evidence
+                    ),
+                    default=0,
+                ),
+                e.id,
+            ),
+        ):
+            key, target = (
+                (edge.source_id, edge.target_id)
+                if direction == "outgoing"
+                else (edge.target_id, edge.source_id)
+            )
+            grouped_calls.setdefault(key, []).append(target)
+        for key, targets in grouped_calls.items():
+            names = joined([identity(i) for i in dict.fromkeys(targets)])
+            if direction == "incoming":
+                paragraphs.append(
+                    f"{identity(key)} được gọi trực tiếp bởi {names}."
+                    if language == "vi"
+                    else f"{identity(key)} is called directly by {names}."
+                )
+            else:
+                paragraphs.append(
+                    relation_sentence(key, "calls", list(dict.fromkeys(targets)), False)
+                )
+        direct_targets = {
+            (
+                edges[p.edge_ids[0]].target_id
+                if direction == "outgoing"
+                else edges[p.edge_ids[0]].source_id
+            )
+            for p in call_paths
+            if len(p.edge_ids) == 1
+        }
+        indirect = [
+            p
+            for p in call_paths
+            if len(p.edge_ids) > 1
+            and (
+                edges[p.edge_ids[-1]].target_id
+                if direction == "outgoing"
+                else edges[p.edge_ids[-1]].source_id
+            )
+            not in direct_targets
+        ]
+        if indirect:
+            endpoints = list(
+                dict.fromkeys(
+                    edges[p.edge_ids[-1]].target_id
+                    if direction == "outgoing"
+                    else edges[p.edge_ids[-1]].source_id
+                    for p in indirect
+                )
+            )
+            names = joined([identity(i) for i in endpoints])
+            root_name = identity(context.root_id)
+            if direction == "outgoing":
+                paragraphs.append(
+                    f"Qua các bước gọi trên, {root_name} còn gọi gián tiếp {names}."
+                    if language == "vi"
+                    else f"{root_name} calls {names} indirectly through these steps."
+                )
+            else:
+                paragraphs.append(
+                    f"Các hàm {names} gọi gián tiếp {root_name} qua những bước trên."
+                    if language == "vi"
+                    else f"{names} call {root_name} indirectly through these steps."
+                )
+
     # Combine sibling reads/writes with the same call prefix, keeping every
     # selected edge in claims/citations. Incoming paths keep their caller order.
     groups = {}
     for path in paths:
+        if path.relation == "calls":
+            continue
         key = (
             path.direction,
             path.relation,

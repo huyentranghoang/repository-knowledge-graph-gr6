@@ -333,6 +333,23 @@ class KafkaGoMessagingAdapter:
                 source = by_qn.get(publish_callable_qn)
                 if source is None:
                     continue
+                owners = [
+                    c
+                    for c in module.callables
+                    if c.node.start_point[0] + 1 <= line <= c.node.end_point[0] + 1
+                ]
+                if owners:
+                    owner = min(
+                        owners, key=lambda c: c.node.end_byte - c.node.start_byte
+                    )
+                    caller = by_qn.get(owner.qualified_name)
+                    if caller is not None and any(
+                        e.type == EdgeType.CALLS
+                        and e.source_id == caller.id
+                        and e.target_id == source.id
+                        for e in edges.values()
+                    ):
+                        source = caller
                 # Ignore local Publish methods that are not EventPublisher (shadowed).
                 operand = func.child_by_field_name("operand") or named_children(func)[0]
                 if operand.type == "identifier":

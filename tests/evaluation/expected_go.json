@@ -262,7 +262,7 @@
     },
     {
       "type": "publishes",
-      "source": "messaging.EventPublisher.Publish",
+      "source": "app.Processor.Process",
       "target": "orders.projection.updated",
       "rule_id": null,
       "evidence": [{"file_path": "internal/app/processor.go", "start_line": null}],

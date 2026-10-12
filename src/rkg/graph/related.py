@@ -10,6 +10,7 @@ from rkg.graph.access import (
     load_evidence_by_ids,
     require_readable_snapshot,
 )
+from rkg.graph.observation import observe_context
 from rkg.graph.traversal import Direction, _load_snapshot_edges
 from rkg.storage.connection import Storage
 
@@ -134,7 +135,7 @@ def build_related_context(
         for edge in selected.values():
             node_ids.update((edge.source_id, edge.target_id))
             evidence_ids.update(edge.evidence_ids)
-        return ContextPackage(
+        context = ContextPackage(
             schema_version="v1",
             repository_id=repository_id,
             snapshot_id=snap.id,
@@ -155,3 +156,6 @@ def build_related_context(
             diagnostic_summary=diagnostic_summary(storage, snap.id),
             budget=ContextBudget(None, None, None, None),
         )
+
+        observe_context(context)
+        return context

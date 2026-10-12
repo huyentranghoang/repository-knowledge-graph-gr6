@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
 from tree_sitter import Node
@@ -415,9 +415,6 @@ def _maybe_http_client_request(
     facts: _Facts,
 ) -> None:
     """Record method + static path when calling get/put/fetch (no dynamic guess)."""
-    # Skip internal HTTP client chains (get → request → fetch).
-    if caller.name.lower() in _HTTP_CLIENT_METHODS:
-        return
     method: str | None = None
     parts = _member_parts(module.source, callee) if callee is not None else None
     is_fetch = parts == ["fetch"] or parts == ["globalThis", "fetch"]
@@ -446,6 +443,37 @@ def _maybe_http_client_request(
     response_type = _call_type_arg_text(module.source, call)
     _annotate_http_request(
         facts, caller, method=method, path=path, response_type=response_type
+    )
+    attrs = dict(facts.entities[caller.id].attributes)
+    if (
+        args
+        and args[0].type == "template_string"
+        and any(c.type == "template_substitution" for c in args[0].children)
+    ):
+        attrs["http_path_dynamic"] = True
+        attrs["http_path_parameters"] = tuple(
+            dict.fromkeys(
+                text_of(module.source, n)
+                for c in named_children(args[0])
+                if c.type == "template_substitution"
+                for n in walk_named(c)
+                if n.type == "identifier"
+                and text_of(module.source, n) not in {"encodeURIComponent"}
+            )
+        )
+    ancestor = call.parent
+    while ancestor is not None and ancestor != module.tree.root_node:
+        if ancestor.type == "call_expression":
+            wrapper = text_of(module.source, child_named(ancestor, "function"))
+            if wrapper == "useEffect" and target:
+                existing = tuple(attrs.get("callback_calls") or ())
+                attrs["callback_calls"] = tuple(
+                    dict.fromkeys((*existing, f"useEffect gọi {target.qualified_name}"))
+                )
+                break
+        ancestor = ancestor.parent
+    facts.entities[caller.id] = replace(
+        facts.entities[caller.id], attributes=tuple(attrs.items())
     )
 
 
@@ -1280,6 +1308,27 @@ def _scan_calls(
             target = index.unique(target_name, frozenset({EntityType.CALLABLE}))
             # Evidence-based outbound request summary for UI→API List/Graph.
             _maybe_http_client_request(module, node, callee, caller, target, facts)
+            if target is not None:
+                ancestor = node.parent
+                while ancestor is not None and ancestor != definition.node:
+                    if (
+                        ancestor.type == "call_expression"
+                        and text_of(module.source, child_named(ancestor, "function"))
+                        == "useEffect"
+                    ):
+                        current = facts.entities[caller.id]
+                        attrs = dict(current.attributes)
+                        refs = tuple(attrs.get("callback_calls") or ())
+                        attrs["callback_calls"] = tuple(
+                            dict.fromkeys(
+                                (*refs, f"useEffect gọi {target.qualified_name}")
+                            )
+                        )
+                        facts.entities[caller.id] = replace(
+                            current, attributes=tuple(attrs.items())
+                        )
+                        break
+                    ancestor = ancestor.parent
             if target is not None and target.id != caller.id:
                 edges.add(
                     EdgeType.CALLS,
@@ -1385,9 +1434,7 @@ def _env_default_params(module: TsModule, definition: TsDefinition) -> set[str]:
     return found
 
 
-def _enclosing_definition(
-    module: TsModule, node: Node
-) -> TsDefinition | None:
+def _enclosing_definition(module: TsModule, node: Node) -> TsDefinition | None:
     best: TsDefinition | None = None
     best_span: int | None = None
     for item in module.definitions:
@@ -1573,6 +1620,9 @@ def resolve_typescript(
                     scope.local_functions.add(name)
 
         _resolve_imports(module, source, index, edges, diagnostics)
+        from rkg.adapters.typescript_semantics import enrich_class_semantics
+
+        enrich_class_semantics(module, index, scope, facts, edges)
 
         for definition in module.definitions:
             if definition.kind not in {

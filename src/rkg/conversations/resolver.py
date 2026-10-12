@@ -14,15 +14,30 @@ class Lookup:
     path: str | None = None
 
 
+def intent_question(question: str) -> str:
+    """Keep the code question separate from appended execution/override demands."""
+    prefix, separator, suffix = question.partition("?")
+    if separator and re.search(
+        r"bỏ (?:mọi|qua|bằng)|bỏ bằng|bí mật|chạy (?:source|worker)|"
+        r"ignore (?:all|the)|disregard|execute|secrets|khẳng định|thay topic",
+        suffix,
+        re.I,
+    ):
+        return prefix + "?"
+    return question
+
+
 def explicit_lookup(question: str) -> Lookup | None:
     method_path = re.search(
         r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[^\s`]+)", question, re.I
     )
     if method_path:
-        return Lookup("", "Endpoint", method_path[1].upper(), method_path[2])
+        return Lookup(
+            "", "Endpoint", method_path[1].upper(), method_path[2].rstrip("?.!,;\"'”")
+        )
     path = re.search(r"(?<!\w)(/[^\s`]+)", question)
     if path:
-        return Lookup("", "Endpoint", path=path[1])
+        return Lookup("", "Endpoint", path=path[1].rstrip("?.!,;\"'”"))
     kind = "Endpoint" if re.search(r"\bendpoint\b", question, re.I) else "any"
     quoted = re.search(r"`([^`]+)`", question)
     qualified = re.search(r"\b\w+(?:[._]\w+)+\b", question)
@@ -38,7 +53,17 @@ def explicit_lookup(question: str) -> Lookup | None:
         question,
         re.I,
     )
-    match = quoted or qualified or typed or named
+    symbols = re.findall(r"\b[A-Za-z_]\w*[a-z][A-Z]\w*\b", question)
+    camel = (
+        re.search(r"\b" + re.escape(symbols[0]) + r"\b", question)
+        if len(symbols) == 1
+        else None
+    )
+    if camel is not None and not mention_precedes_pronoun(
+        question, {camel[0].casefold()}
+    ):
+        camel = None
+    match = quoted or qualified or camel or typed or named
     if not match:
         return None
     value = (
@@ -61,7 +86,10 @@ def intent_direction(question: str) -> str:
     return (
         "incoming"
         if re.search(
-            r"\b(?:who calls|called by|callers|ai gọi|ai goi)\b", question, re.I
+            r"\b(?:who calls|called by|callers|ai gọi|ai goi|hàm nào gọi|"
+            r"ham nao goi|which function calls|which method calls)\b",
+            question,
+            re.I,
         )
         else "outgoing"
     )
@@ -72,7 +100,7 @@ _PROSE_WORDS = frozenset(
     """what which who how where is are does do it its this that
 and or the a an calls call called reads read writes write contains contain
 function functions endpoint handler source file located defined please show tell
-me can you no nó đó ấy gi gì nao nào nhung những dang đang goi gọi ham hàm
+me can you no nó đó ấy gi gì nao nào nhung những dang đang goi gọi ham hàm xử xu lý ly
 nam nằm o ở dau đâu toi tôi cho biet biết va và cua của trong tai tại""".split()
 )
 
@@ -137,6 +165,10 @@ def source_location_only(question: str, entity) -> bool:
         "o",
         "được",
         "duoc",
+        "dòng",
+        "dong",
+        "line",
+        "lines",
     }
     remaining = {word.casefold() for word in re.findall(r"\b\w+\b", question)}
     return not (remaining - identity - filler)

@@ -89,9 +89,8 @@ def test_actual_adapter_terminal_levels_and_verbatim_debug(tmp_path, name, level
             "model_profile",
             "provider_request",
             "provider_response",
-            "model_output",
-            "narrative_validation_failed",
+            "schema_validation_failed",
         ]:
             assert "event=" + event in log
-        assert "unknown_edge" in log
+        assert "invalid_schema" in log
         assert "[masked]" not in log

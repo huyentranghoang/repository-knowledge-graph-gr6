@@ -7,6 +7,7 @@ constants. Runtime-built SQL never becomes a guessed edge.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 from rkg.adapters.contracts import (
     CONTRACT_VERSION,
@@ -160,9 +161,7 @@ class PgxDataAccessAdapter:
                 sql_consts[key] = (sql, kind, tables, module.path, line)
                 sql_consts[name] = sql_consts[key]
 
-        def ensure_resource(
-            schema: str, table: str, path: str, line: int
-        ) -> Entity:
+        def ensure_resource(schema: str, table: str, path: str, line: int) -> Entity:
             qualified = f"relational:{schema}.{table}"
             existing = by_qn.get(qualified)
             if existing is not None:
@@ -247,9 +246,9 @@ class PgxDataAccessAdapter:
                     )
                     if func is None or func.type != "selector_expression":
                         continue
-                    field = func.child_by_field_name("field") or named_children(func)[
-                        -1
-                    ]
+                    field = (
+                        func.child_by_field_name("field") or named_children(func)[-1]
+                    )
                     method = text_of(module.source, field)
                     if method not in {"QueryRow", "Exec", "Query"}:
                         continue
@@ -277,17 +276,25 @@ class PgxDataAccessAdapter:
                         )
                         continue
                     _sql, kind, tables, sql_path, sql_line = info
+                    current = entities[source.id]
+                    attrs = dict(current.attributes)
+                    operations = tuple(attrs.get("query_operations") or ())
+                    attrs["query_operations"] = tuple(
+                        dict.fromkeys((*operations, f"{method}({sql_name})"))
+                    )
+                    refs = tuple(attrs.get("query_sources") or ())
+                    ref = f"{sql_name}@{sql_path}:{sql_line}"
+                    attrs["query_sources"] = tuple(dict.fromkeys((*refs, ref)))
+                    entities[source.id] = replace(
+                        current, attributes=tuple(attrs.items())
+                    )
                     for schema, table in tables:
-                        resource = ensure_resource(
-                            schema, table, sql_path, sql_line
-                        )
+                        resource = ensure_resource(schema, table, sql_path, sql_line)
                         edge_kind = (
                             EdgeType.READS if kind == "read" else EdgeType.WRITES
                         )
                         rule = READ_RULE if kind == "read" else WRITE_RULE
-                        relate(
-                            edge_kind, source, resource, module.path, line, rule
-                        )
+                        relate(edge_kind, source, resource, module.path, line, rule)
 
         diagnostics = tuple(
             sorted(

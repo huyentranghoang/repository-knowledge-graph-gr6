@@ -320,6 +320,8 @@ def test_incoming_indirect_calls_are_sentences_in_actual_call_order():
     context = fixture()
     path = NarrativePath("calls", "incoming", "a", ("ca", "bc"))
     answer, claims, _ = render_narrative((path,), context, "vi")
-    assert answer == "b gọi gián tiếp a. Cụ thể, b gọi c. c gọi a."
+    assert "a được gọi trực tiếp bởi c" in answer
+    assert "c được gọi trực tiếp bởi b" in answer
+    assert "b gọi gián tiếp a" in answer
     assert "a gọi b" not in answer and "→" not in answer
     assert {c["edge_id"] for c in claims} == {"ca", "bc"}

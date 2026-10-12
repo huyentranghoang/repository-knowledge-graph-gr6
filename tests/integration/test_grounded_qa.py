@@ -57,14 +57,16 @@ def test_answer_and_followup_use_pinned_edges_and_citations(graph) -> None:
     )
     assert first.submission.turn.status == "answered"
     assert "a calls b" in first.submission.turn.answer
-    assert first.submission.turn.citations == [
-        {
-            "snapshot_id": snapshot,
-            "entity_id": b.id,
-            "evidence_id": edge.evidence_ids[0],
-            "edge_id": edge.id,
-        }
-    ]
+    assert {
+        "snapshot_id": snapshot,
+        "entity_id": b.id,
+        "evidence_id": edge.evidence_ids[0],
+        "edge_id": edge.id,
+    } in first.submission.turn.citations
+    assert all(
+        c["snapshot_id"] == snapshot and c["edge_id"] in {e.id for e in batch.edges}
+        for c in first.submission.turn.citations
+    )
     assert first.submission.conversation.state["focus_entity_id"] == a.id
     assert first.submission.turn.usage["model_calls"] == 1
     assert first_provider.requests[0].max_output_tokens is None

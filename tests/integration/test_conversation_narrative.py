@@ -133,7 +133,7 @@ def test_endpoint_prompt_contains_handler_anchors_and_complete_graph_limits(grap
     "kind,stage,reason",
     [
         ("schema", "narrative", "invalid_schema"),
-        ("foreign_edge", "narrative_grounding", "invalid_graph_references"),
+        ("foreign_edge", "narrative", "invalid_schema"),
     ],
 )
 def test_failed_narrative_logs_only_safe_stage_reason(

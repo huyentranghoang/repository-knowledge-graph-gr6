@@ -170,12 +170,8 @@ def test_orders_page_call_chain_to_http_client(tmp_path: Path) -> None:
     )
     _, _, _, _, _, resolved = _run(tmp_path)
     calls = _edge_pairs(resolved, EdgeType.CALLS)
-    assert any(
-        "OrdersPage" in src and "useOrders" in tgt for src, tgt in calls
-    ), calls
-    assert any(
-        "useOrders" in src and "listOrders" in tgt for src, tgt in calls
-    ), calls
+    assert any("OrdersPage" in src and "useOrders" in tgt for src, tgt in calls), calls
+    assert any("useOrders" in src and "listOrders" in tgt for src, tgt in calls), calls
     assert any("listOrders" in src and "get" in tgt for src, tgt in calls), calls
     call_edges = [e for e in resolved.facts.edges if e.type == EdgeType.CALLS]
     assert call_edges and all(edge.evidence_ids for edge in call_edges)
@@ -194,7 +190,8 @@ def test_http_client_skips_dynamic_path_but_keeps_method(tmp_path: Path) -> None
         "src/services/httpClient.ts",
         "export class FetchHttpClient {\n"
         "  async get<T>(path: string): Promise<T> { return path as T; }\n"
-        "  async put<T>(path: string, body: unknown): Promise<T> { return body as T; }\n"
+        "  async put<T>(path: string, body: unknown): Promise<T> { "
+        "return body as T; }\n"
         "}\n"
         "export const httpClient = new FetchHttpClient();\n",
     )
@@ -225,8 +222,12 @@ def test_http_client_skips_dynamic_path_but_keeps_method(tmp_path: Path) -> None
     }
     assert dict(by_name["getOrder"].attributes).get("http_requests") == "GET"
     assert dict(by_name["getOrder"].attributes).get("http_response_types") == "Order"
-    assert dict(by_name["listOrders"].attributes).get("http_requests") == "GET /api/orders"
-    assert dict(by_name["listOrders"].attributes).get("http_response_types") == "Order[]"
+    assert (
+        dict(by_name["listOrders"].attributes).get("http_requests") == "GET /api/orders"
+    )
+    assert (
+        dict(by_name["listOrders"].attributes).get("http_response_types") == "Order[]"
+    )
     # Relative path must not become an ExternalDependency origin.
     deps = {
         item.qualified_name
@@ -303,12 +304,12 @@ def test_dynamic_import_is_not_guessed(tmp_path: Path) -> None:
     _write(tmp_path, "src/services/orderApi.ts", "export const orderApi = {};\n")
     _, _, _, _, parsed, resolved = _run(tmp_path)
     imports = _edge_pairs(resolved, EdgeType.IMPORTS)
-    assert not any(
-        "dynamicImport" in src and "orderApi" in tgt for src, tgt in imports
+    assert not any("dynamicImport" in src and "orderApi" in tgt for src, tgt in imports)
+    codes = (
+        {item.code for item in parsed.diagnostics}
+        | {item.code for item in resolved.diagnostics}
+        | {item.code for item in resolved.facts.diagnostics}
     )
-    codes = {item.code for item in parsed.diagnostics} | {
-        item.code for item in resolved.diagnostics
-    } | {item.code for item in resolved.facts.diagnostics}
     assert any("unresolved" in code or "dynamic" in code for code in codes), codes
 
 
@@ -408,3 +409,71 @@ def test_syntax_error_is_isolated_with_relative_path(tmp_path: Path) -> None:
     assert any("healthy" in name for name in names)
     assert str(tmp_path) not in repr(resolved)
     assert str(tmp_path) not in _rendered(resolved)
+
+
+def test_http_wrappers_dynamic_paths_and_effect_context_are_source_backed(tmp_path):
+    _write(
+        tmp_path,
+        "api.ts",
+        """
+export class Client {
+  get(path: string) { return this.request(path, {method: 'GET'}); }
+  request(path: string, options: unknown) { return fetch(path, options); }
+}
+const client = new Client();
+export function load(orderId: string) {
+  return client.get(`/api/orders/${encodeURIComponent(orderId)}`);
+}
+export function useOrders() {
+  useEffect(() => { load('example'); }, []);
+}
+""",
+    )
+    *_, resolved = _run(tmp_path)
+    attrs = {e.qualified_name: dict(e.attributes) for e in resolved.facts.entities}
+    assert attrs["api.Client.get"]["http_requests"] == "GET"
+    assert attrs["api.load"]["http_requests"] == "GET"
+    assert attrs["api.load"]["http_path_dynamic"] is True
+    assert attrs["api.load"]["http_path_parameters"] == ("orderId",)
+    assert attrs["api.useOrders"]["callback_calls"] == ("useEffect gọi api.load",)
+    assert "/api/orders/example" not in json.dumps(attrs)
+
+
+def test_map_metadata_requires_readonly_unshadowed_map_and_no_other_calls(tmp_path):
+    _write(
+        tmp_path,
+        "store.ts",
+        """
+export class Store {
+  private readonly rows = new Map();
+  private mutable = new Map();
+  read(id: string) { return this.rows.get(id); }
+  mixed(id: string) { notify(); return this.rows.get(id); }
+  mutableRead(id: string) { return this.mutable.get(id); }
+}
+""",
+    )
+    *_, resolved = _run(tmp_path)
+    attrs = {e.qualified_name: dict(e.attributes) for e in resolved.facts.entities}
+    assert attrs["store.Store.read"]["storage_operations_only"] is True
+    assert attrs["store.Store.mixed"]["storage_operations_only"] is False
+    assert "storage_kind" not in attrs["store.Store.mutableRead"]
+
+
+def test_shadowed_map_does_not_claim_in_memory_or_no_sql(tmp_path):
+    _write(
+        tmp_path,
+        "store.ts",
+        """
+class Map { get(id: string) { return query(id); } }
+export class Store {
+  private readonly rows = new Map();
+  read(id: string) { return this.rows.get(id); }
+}
+""",
+    )
+    *_, resolved = _run(tmp_path)
+    method = next(
+        e for e in resolved.facts.entities if e.qualified_name == "store.Store.read"
+    )
+    assert "storage_kind" not in dict(method.attributes)

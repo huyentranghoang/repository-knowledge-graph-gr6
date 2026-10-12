@@ -187,7 +187,13 @@ def test_soopi_complete_context_and_grounded_turn(
         assert page.total == 1
         root = page.items[0]
         context = build_related_context(
-            store, repo.id, sid, root.id, edge_types=relations
+            store,
+            repo.id,
+            sid,
+            root.id,
+            edge_types=(*relations, "calls")
+            if relations == ("handled_by",)
+            else relations,
         )
         guidance = narrative_guidance(context, relations)
         assert guidance["candidate_paths"] and not context.truncated

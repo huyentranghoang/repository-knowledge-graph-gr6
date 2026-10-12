@@ -791,6 +791,13 @@ class SpringFrameworkAdapter:
                         )
                         continue
                     class_path = resolved
+                declared = by_qn.get(item.qualified_name)
+                if declared is not None and is_controller and class_mapping is not None:
+                    attrs = dict(declared.attributes)
+                    attrs["route_prefix"] = class_path
+                    entities[declared.id] = replace(
+                        declared, attributes=tuple(attrs.items())
+                    )
                 for callable_item in item.callables:
                     if callable_item.kind != "method":
                         continue

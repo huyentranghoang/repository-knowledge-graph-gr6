@@ -16,6 +16,7 @@ from typing import Any, NoReturn
 from rkg.conversations.change_guidance import (
     change_intent,
     feature_reference,
+    implementation_details,
     nearby_endpoints,
     suggest_changes,
 )
@@ -33,6 +34,7 @@ from rkg.conversations.resolver import (
     asks_source_location,
     explicit_lookup,
     intent_direction,
+    intent_question,
     mention_precedes_pronoun,
     question_identifiers,
     source_location_only,
@@ -46,8 +48,14 @@ from rkg.conversations.service import (
 )
 from rkg.domain.models import ContextPackage, Edge, Entity
 from rkg.graph import get_entity
+from rkg.graph.observation import observe_entity
 from rkg.graph.related import build_related_context as build_context
-from rkg.graph.search import entity_short_names, lookup_entities, lookup_named_entities
+from rkg.graph.search import (
+    entity_short_names,
+    get_entities,
+    lookup_entities,
+    lookup_named_entities,
+)
 from rkg.llm.diagnostics import log_rejection
 from rkg.llm.provider import (
     LLMError,
@@ -104,7 +112,11 @@ _RELATION_WORDS: tuple[tuple[str, str], ...] = (
     ("inherits_from", r"\b(?:inherit|inherits|inheritance|kế thừa|ke thua)\b"),
     ("contains", r"\b(?:contain|contains|chứa|chua)\b"),
     ("exposes", r"\b(?:expose|exposes|công bố|cong bo)\b"),
-    ("handled_by", r"\b(?:handled by|handles|xử lý bởi|xu ly boi)\b"),
+    (
+        "handled_by",
+        r"\b(?:handled by|handles|xử lý bởi|xu ly boi|"
+        r"hiển thị component|hien thi component|xử lý ở đâu|xu ly o dau)\b",
+    ),
     (
         "depends_on",
         r"\b(?:depend|depends|dependency|dependencies|phụ thuộc|phu thuoc)\b",
@@ -118,9 +130,14 @@ def _relation_types(question: str) -> tuple[str, ...]:
     text = re.sub(
         r"\x60[^\x60]*\x60|/\S+|\b\w+(?:[._]\w+)+\b", " ", question.casefold()
     )
-    return tuple(
+    relations = tuple(
         edge_type for edge_type, pattern in _RELATION_WORDS if re.search(pattern, text)
     )
+    if not relations and re.search(r"\b(?:queryrow|exec)\b", text):
+        return ("calls",)
+    if not relations and re.search(r"\btopic\b", text):
+        return ("publishes",)
+    return relations
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +217,7 @@ class _Coordinator:
 
     def _run(self, turn: TurnContext) -> ProviderResult:
         self.language = effective_language(turn.question, turn.ui_locale)
+        turn = replace(turn, question=intent_question(turn.question))
         if getattr(self.provider, "enabled", True) is False:
             raise LLMError("llm_disabled")
         if is_greeting(turn.question):
@@ -252,6 +270,9 @@ class _Coordinator:
         )
         if self.history_truncated:
             self.limitations.append("history_truncated")
+        multi = self._multiple_types(turn)
+        if multi is not None:
+            return multi
         root, candidates = self._choose_root(turn, history)
         if candidates:
             return self._clarify(turn, candidates)
@@ -270,6 +291,8 @@ class _Coordinator:
             self.direction = intent["direction"]
             self.entity_type = intent["entity_type"]
             selection = True
+        root = self._role_root(turn, root)
+        observe_entity(root)
         self.subject = root
         change = change_intent(turn.question)
         if change:
@@ -302,6 +325,11 @@ class _Coordinator:
         relation_types = self.relations or _relation_types(turn.question)
         inherited_relation = False
         location_only = source_location_only(turn.question, root)
+        location_only = location_only or (
+            asks_source_location(turn.question)
+            and not relation_types
+            and root.type.value in {"Callable", "Type"}
+        )
         if (
             not relation_types
             and not location_only
@@ -344,6 +372,42 @@ class _Coordinator:
                 response_metadata=self._metadata("answer"),
                 pending_intent_update="clear",
             )
+        metadata_answer = self._metadata_answer(turn, root)
+        if metadata_answer is not None and "calls" not in relation_types:
+            return ProviderResult(
+                status="answered",
+                answer=metadata_answer,
+                resolved_question=resolved_question,
+                focus_entity_id=root.id,
+                usage=self._usage_dict(),
+                context_turn_ids=self._history_ids,
+                response_metadata=self._metadata("answer"),
+                pending_intent_update="clear",
+            )
+        if root.type.value == "Callable" and "calls" in relation_types:
+            topic_context = build_context(
+                self.storage,
+                turn.repository_id,
+                turn.snapshot_id,
+                root.id,
+                edge_types=("consumes",),
+            )
+            if any(
+                e.source_id == root.id and e.type.value == "consumes"
+                for e in topic_context.edges
+            ):
+                relation_types = (*relation_types, "consumes")
+                self.relations = relation_types
+        if (
+            root.type.value == "Callable"
+            and "consumes" in relation_types
+            and "calls" not in relation_types
+        ):
+            relation_types = (*relation_types, "calls")
+            self.relations = relation_types
+        if root.type.value == "Endpoint" and "handled_by" in relation_types:
+            relation_types = (*relation_types, "calls")
+            self.relations = relation_types
         self.budget.reserve_graph_query()
         self.evaluated = True
         context = build_context(
@@ -361,6 +425,193 @@ class _Coordinator:
                 for reason in context.truncation_reasons
             )
         return self._synthesize(turn, root, context, resolved_question)
+
+    def _role_root(self, turn: TurnContext, root: Entity) -> Entity:
+        handler = (
+            root.type.value == "Endpoint"
+            and asks_source_location(turn.question)
+            and bool(re.search(r"hàm xử lý|ham xu ly|handler", turn.question, re.I))
+        )
+        processor = bool(
+            re.search(r"\bprocessor\b", turn.question, re.I)
+        ) and _followup_uses_focus(turn.question)
+        if not handler and not processor:
+            return root
+        self.budget.reserve_graph_query()
+        context = build_context(
+            self.storage,
+            turn.repository_id,
+            turn.snapshot_id,
+            root.id,
+            edge_types=("handled_by",) if handler else ("calls",),
+        )
+        nodes = {e.id: e for e in context.nodes}
+        candidates = [
+            nodes[e.target_id]
+            for e in context.edges
+            if e.source_id == root.id
+            and e.type.value == ("handled_by" if handler else "calls")
+        ]
+        if processor:
+            candidates = [
+                e for e in candidates if re.search(r"process|processor", e.name, re.I)
+            ]
+        return candidates[0] if len(candidates) == 1 else root
+
+    def _multiple_types(self, turn: TurnContext) -> ProviderResult | None:
+        relations = _relation_types(turn.question)
+        if not set(relations) & {"implements", "inherits_from"}:
+            return None
+        self.budget.reserve_graph_query()
+        page = lookup_named_entities(
+            self.storage,
+            turn.repository_id,
+            turn.snapshot_id,
+            question_identifiers(turn.question),
+            entity_type="Type",
+        )
+        if page.total < 2 or page.total != len(page.items):
+            return None
+        answers, claims, citations = [], [], []
+        self.subject = page.items[0]
+        for root in page.items:
+            observe_entity(root)
+            context = build_context(
+                self.storage,
+                turn.repository_id,
+                turn.snapshot_id,
+                root.id,
+                edge_types=relations,
+            )
+            paths = self._candidate_references(
+                context, relations, "outgoing", turn.question
+            )
+            if not paths:
+                return None
+            answer, more_claims, more_citations = render_narrative(
+                paths, context, self.language
+            )
+            offset = len(citations)
+            answers.append(answer)
+            claims.extend(
+                {**c, "citation_indexes": [i + offset for i in c["citation_indexes"]]}
+                for c in more_claims
+            )
+            citations.extend(more_citations)
+        self.evaluated = True
+        return ProviderResult(
+            status="answered",
+            answer="\n\n".join(answers),
+            focus_entity_id=self.subject.id,
+            claims=tuple(claims),
+            citations=tuple(citations),
+            resolved_question=turn.question,
+            usage=self._usage_dict(),
+            context_turn_ids=self._history_ids,
+            response_metadata=self._metadata("answer"),
+            pending_intent_update="clear",
+        )
+
+    def _metadata_answer(self, turn: TurnContext, root: Entity) -> str | None:
+        attrs = dict(root.attributes)
+        if re.search(r"hostname|tên miền|ten mien|host name", turn.question, re.I):
+            return None
+        if attrs.get("returns_callable"):
+            name = attrs["returns_callable"]
+            return (
+                f"`{root.name}` tạo và trả về handler `{name}`."
+                if self.language == "vi"
+                else f"`{root.name}` creates and returns the handler `{name}`."
+            )
+        nested = json.loads(attrs.get("nested_http_requests") or "{}")
+        child = next(
+            (
+                name
+                for name in nested
+                if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", turn.question)
+            ),
+            None,
+        )
+        request = nested.get(child) if child else attrs.get("http_requests")
+        if request and re.search(
+            r"request|method|path|fetcher|fetch|kiểu gì|kieu gi|gọi|goi|calls",
+            turn.question,
+            re.I,
+        ):
+            name = f"{root.name}.{child}" if child else root.qualified_name
+            text = (
+                f"Request tĩnh phía client của `{name}` là `{request}`."
+                if self.language == "vi"
+                else f"The static client request for `{name}` is `{request}`."
+            )
+            default = attrs.get("http_default_fetcher")
+            if default:
+                text += (
+                    f" Fetcher mặc định là `{default}`."
+                    if self.language == "vi"
+                    else f" The default fetcher is `{default}`."
+                )
+            return text
+        if attrs.get("storage_kind") == "memory_map" and re.search(
+            r"ghi|SQL|lưu|cập nhật|save|store|update|gọi|call", turn.question, re.I
+        ):
+            ops = ", ".join(attrs.get("storage_operations") or [])
+            text = (
+                f"`{root.qualified_name}` thao tác với Map trong bộ nhớ bằng {ops}."
+                if self.language == "vi"
+                else f"`{root.qualified_name}` accesses an in-memory Map using {ops}."
+            )
+            if attrs.get("storage_operations_only"):
+                text += (
+                    " Hàm này không gọi SQL."
+                    if self.language == "vi"
+                    else "This function has no SQL call."
+                )
+            return text
+        return None
+
+    @staticmethod
+    def _candidate_references(context, relations, direction, question):
+        from rkg.conversations.narrative import validate_narrative
+
+        grouped = {}
+        nodes = {e.id: e for e in context.nodes}
+        edges = {e.id: e for e in context.edges}
+        direct = bool(
+            re.search(r"trực tiếp|truc tiep|directly|direct callers", question, re.I)
+        )
+        application = bool(
+            re.search(r"code (?:ứng dụng|application)|application code", question, re.I)
+        )
+        for item in narrative_guidance(context, relations, direction)[
+            "candidate_paths"
+        ]:
+            if direct and len(item["edge_ids"]) != 1:
+                continue
+            if application:
+                source = nodes[
+                    edges[
+                        item["edge_ids"][-1 if direction == "incoming" else 0]
+                    ].source_id
+                ]
+                if (
+                    source.name.startswith("test_")
+                    or source.file_path
+                    and any(p in {"test", "tests"} for p in source.file_path.split("/"))
+                ):
+                    continue
+            grouped.setdefault(item["relation"], []).append(
+                {"anchor_id": item["anchor_id"], "edge_ids": item["edge_ids"]}
+            )
+        value = {
+            "status": "answered" if grouped else "insufficient_evidence",
+            "root_id": context.root_id,
+            "sections": [
+                {"relation": relation, "direction": direction, "paths": paths}
+                for relation, paths in grouped.items()
+            ],
+        }
+        return validate_narrative(value, context, relations, direction)
 
     def _choose_root(
         self, turn: TurnContext, history: list[dict[str, str]]
@@ -395,12 +646,42 @@ class _Coordinator:
                 if len(references) > 20:
                     return None, ()
                 return None, tuple(e.id for e in references)
-            if (
-                page.total == 1
-                and lookup.path is None
-                or (page.total == 1 and lookup.method is not None)
-            ):
+            if page.total == 1:
                 return page.items[0], ()
+            if page.total > 1 and turn.focus_entity_id:
+                focus = self._get_entity(turn, turn.focus_entity_id)
+                if focus is not None:
+                    owner = focus.qualified_name.rsplit(".", 1)[0]
+                    scoped = [
+                        e
+                        for e in page.items
+                        if e.qualified_name.rsplit(".", 1)[0] == owner
+                    ]
+                    if len(scoped) == 1:
+                        return scoped[0], ()
+            if page.total == 0 and "." in lookup.query:
+                parent, child = lookup.query.rsplit(".", 1)
+                outer = lookup_entities(
+                    self.storage,
+                    turn.repository_id,
+                    turn.snapshot_id,
+                    query=parent,
+                    entity_type="Callable",
+                )
+                if outer.total == 1 and child in json.loads(
+                    dict(outer.items[0].attributes).get("nested_http_requests") or "{}"
+                ):
+                    return outer.items[0], ()
+            if (
+                page.total == 0
+                and turn.focus_entity_id
+                and _followup_uses_focus(turn.question)
+            ):
+                focus = self._get_entity(turn, turn.focus_entity_id)
+                if focus and lookup.query in json.loads(
+                    dict(focus.attributes).get("nested_http_requests") or "{}"
+                ):
+                    return focus, ()
             return None, tuple(item.id for item in page.items)
         words = question_identifiers(turn.question)
         mentioned = None
@@ -474,11 +755,12 @@ class _Coordinator:
                 ]
             references = feature_reference(turn.question, reference_catalog)
             if references:
-                kind = (
-                    "Endpoint"
-                    if re.search(r"\b(?:api|endpoint)\b", turn.question, re.I)
-                    else "any"
-                )
+                kinds = {
+                    e["type"]
+                    for e in reference_catalog
+                    if e["qualified_name"] in references
+                }
+                kind = next(iter(kinds)) if len(kinds) == 1 else "any"
                 self.entity_type = kind
                 self.evaluated = True
                 matches = []
@@ -674,7 +956,24 @@ class _Coordinator:
     ) -> ProviderResult:
         supported = usable_evidence(context)
         if not any(set(e.evidence_ids) & supported for e in context.edges):
+            metadata = self._metadata_answer(turn, root)
+            if metadata:
+                return ProviderResult(
+                    status="answered",
+                    answer=metadata,
+                    resolved_question=resolved_question,
+                    focus_entity_id=root.id,
+                    usage=self._usage_dict(),
+                    context_turn_ids=self._history_ids,
+                    response_metadata=self._metadata("answer"),
+                    pending_intent_update="clear",
+                )
             return self._insufficient(turn, "relation_not_found")
+        model_relations = (
+            ("handled_by",)
+            if root.type.value == "Endpoint" and "handled_by" in self.relations
+            else self.relations
+        )
         payload = {
             "question": resolved_question,
             "language": self.language,
@@ -714,8 +1013,19 @@ class _Coordinator:
                 if e.id in supported
             ],
             "truncated": context.truncated,
-            **narrative_guidance(context, self.relations, self.direction),
+            **narrative_guidance(context, model_relations, self.direction),
         }
+        schema = narrative_schema(context)
+        schema["properties"]["root_id"]["enum"] = [context.root_id]
+        section_schema = schema["properties"]["sections"]["items"]["properties"]
+        if model_relations:
+            section_schema["relation"]["enum"] = list(model_relations)
+        section_schema["direction"]["enum"] = [self.direction]
+        path_schema = section_schema["paths"]["items"]["properties"]
+        anchors = sorted({a["anchor_id"] for a in payload["allowed_anchors"]})
+        if anchors:
+            path_schema["anchor_id"]["enum"] = anchors
+        path_schema["edge_ids"]["items"]["enum"] = [e["id"] for e in payload["facts"]]
         selected = self._complete(
             StructuredRequest(
                 messages=(
@@ -757,7 +1067,7 @@ class _Coordinator:
                     },
                 ),
                 schema_name="rkg_narrative_v1",
-                schema=narrative_schema(context),
+                schema=schema,
                 max_output_tokens=self.budget.max_output_tokens,
             )
         ).value
@@ -769,7 +1079,68 @@ class _Coordinator:
             self._reject("narrative_grounding", "invalid_graph_references")
         if not paths:
             return self._insufficient(turn, "answer_not_supported")
+        # The provider's valid selection establishes relevance; include all proven
+        # requested paths so an arbitrary model subset cannot hide supported facts.
+        paths = self._candidate_references(
+            context, self.relations, self.direction, resolved_question
+        )
         answer, claims, citations = render_narrative(paths, context, self.language)
+        involved = {i for path in paths for i in path.edge_ids}
+        selected_nodes = {context.root_id} | {
+            e.target_id for e in context.edges if e.id in involved
+        }
+        for node in context.nodes:
+            if node.id in selected_nodes:
+                request_details = self._metadata_answer(turn, node)
+                attrs = dict(node.attributes)
+                extras = []
+                if attrs.get("http_requests") and not request_details:
+                    extras.append(
+                        f"`{node.qualified_name}` dùng request "
+                        f"`{attrs['http_requests']}`."
+                    )
+                if attrs.get("http_path_dynamic"):
+                    extras.append(
+                        f"Path của `{node.qualified_name}` được tạo động; "
+                        "tham số gồm "
+                        f"{', '.join(attrs.get('http_path_parameters') or ())}. "
+                        "Snapshot không xác định URL runtime."
+                    )
+                for operation in attrs.get("query_operations") or ():
+                    extras.append(f"`{node.qualified_name}` gọi {operation}.")
+                for ref in attrs.get("query_sources") or ():
+                    symbol, source = ref.split("@", 1)
+                    extras.append(f"SQL `{symbol}` nằm tại `{source}`.")
+                for ref in attrs.get("callback_calls") or ():
+                    extras.append(f"Trong `{node.name}`, {ref}.")
+                if node.id != root.id and any(
+                    e.id in involved
+                    and e.type.value == "handled_by"
+                    and e.target_id == node.id
+                    for e in context.edges
+                ):
+                    loc = source_identity(node, self.language)
+                    if loc:
+                        extras.append(loc)
+                if extras:
+                    answer += "\n\n" + " ".join(extras)
+                if request_details:
+                    answer += "\n\n" + request_details
+        details, cs, cites = implementation_details(
+            self.storage,
+            turn.repository_id,
+            turn.snapshot_id,
+            [node for node in context.nodes if node.id in selected_nodes],
+            self.language,
+        )
+        if details:
+            answer += "\n\n" + details
+            offset = len(citations)
+            claims += tuple(
+                {**c, "citation_indexes": [i + offset for i in c["citation_indexes"]]}
+                for c in cs
+            )
+            citations += cites
         if asks_source_location(turn.question):
             location = source_identity(root, self.language)
             if location:
@@ -828,6 +1199,9 @@ class _Coordinator:
         }
 
     def _clarify(self, turn: TurnContext, ids: tuple[str, ...]) -> ProviderResult:
+        entities = get_entities(self.storage, turn.repository_id, turn.snapshot_id, ids)
+        for entity in entities:
+            observe_entity(entity)
         intent = {
             "question": self.resolved or turn.question.strip(),
             "ui_locale": turn.ui_locale,
@@ -859,6 +1233,12 @@ class _Coordinator:
                 else "I found multiple matching entities. Which one do you mean? "
                 "Choose one below so I can continue answering your question."
             )
+            choices = [
+                source_identity(e, self.language) or e.qualified_name for e in entities
+            ]
+            message += "\n" + "\n".join(
+                f"{i}. {choice}" for i, choice in enumerate(choices, 1)
+            )
         return ProviderResult(
             status="needs_clarification",
             answer=message,
@@ -874,6 +1254,21 @@ class _Coordinator:
         self, turn: TurnContext, reason: str = "relation_not_found"
     ) -> ProviderResult:
         change = change_intent(turn.question)
+        lookup = explicit_lookup(turn.question)
+        subject = (
+            self.subject.qualified_name
+            if self.subject
+            else lookup.query
+            if lookup and lookup.query
+            else "mục được hỏi"
+        )
+        uncertainty = (
+            f"Snapshot chưa đủ bằng chứng tĩnh cho thông tin về `{subject}`. "
+            "Tôi chưa thể xác định giá trị hay quan hệ được hỏi."
+            if self.language == "vi"
+            else f"The snapshot lacks static evidence about `{subject}`. "
+            "I cannot establish the requested value or relationship."
+        )
         return ProviderResult(
             status="insufficient_evidence",
             answer=(
@@ -887,11 +1282,7 @@ class _Coordinator:
                     "so I can suggest a file and definition range."
                 )
                 if change
-                else "Chưa tìm thấy bằng chứng phù hợp trong snapshot này. "
-                "Hãy nhập tên hàm, method/path rõ hơn hoặc kiểm tra Explorer."
-                if self.language == "vi"
-                else "I could not find supporting evidence in this snapshot. "
-                "Try a function name or exact method/path, or check Explorer."
+                else uncertainty
             ),
             resolved_question=self.resolved or turn.question,
             response_metadata=self._metadata("insufficient", reason),

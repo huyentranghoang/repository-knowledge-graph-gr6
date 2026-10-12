@@ -547,7 +547,7 @@ def create_app(
                 log_event(
                     "http_request",
                     method=request.method,
-                    route=str(request.url),
+                    route=getattr(request.scope.get("route"), "path", "unmatched"),
                     status=status,
                     elapsed_ms=round((perf_counter() - started) * 1000, 2),
                 )

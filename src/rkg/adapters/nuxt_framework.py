@@ -73,9 +73,7 @@ CONFIG_RULE = "RKG.nuxt.runtime_config.v1"
 HTTP_RULE = "RKG.nuxt.http_origin.v1"
 
 _NUXT_HTTP_CALLEES = frozenset({"$fetch", "useFetch"})
-_HTTP_METHODS = frozenset(
-    {"GET", "PUT", "POST", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-)
+_HTTP_METHODS = frozenset({"GET", "PUT", "POST", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
 _MESSAGES = {
     "nuxt_route_dynamic": (
@@ -463,18 +461,14 @@ def _is_locally_bound(source: bytes, call: Node, name: str) -> bool:
                         continue
                     for node in walk_named(stmt):
                         if node.type == "variable_declarator":
-                            bound = identifier_name(
-                                source, child_named(node, "name")
-                            )
+                            bound = identifier_name(source, child_named(node, "name"))
                             if bound == name:
                                 return True
                         if node.type in {
                             "function_declaration",
                             "generator_function_declaration",
                         }:
-                            bound = identifier_name(
-                                source, child_named(node, "name")
-                            )
+                            bound = identifier_name(source, child_named(node, "name"))
                             if bound == name:
                                 return True
         current = current.parent
@@ -577,9 +571,7 @@ def _annotate_http_request(
     )
 
 
-def _owners_for_line(
-    entities: dict[str, Entity], path: str, line: int
-) -> list[Entity]:
+def _owners_for_line(entities: dict[str, Entity], path: str, line: int) -> list[Entity]:
     owners = [
         item
         for item in entities.values()
@@ -691,11 +683,37 @@ def _index_nuxt_http_in_tree(
             path=req_path,
             response_type=response_type,
         )
+        current = entities[owners[0].id]
+        attrs = dict(current.attributes)
+        if is_fetch_param:
+            attrs["http_default_fetcher"] = "$fetch"
+        inner = node.parent
+        while inner is not None and inner.start_point[0] + 1 >= current.start_line:
+            if inner.type in {"function_declaration", "function_expression"}:
+                inner_name = identifier_name(source, child_named(inner, "name"))
+                if inner_name and inner_name != current.name:
+                    nested = json.loads(attrs.get("nested_http_requests") or "{}")
+                    nested[inner_name] = f"{method} {req_path}" if req_path else method
+                    attrs["nested_http_requests"] = json.dumps(nested, sort_keys=True)
+                    break
+            inner = inner.parent
+        entities[current.id] = Entity(
+            current.id,
+            current.repository_id,
+            current.snapshot_id,
+            current.type,
+            current.name,
+            current.qualified_name,
+            current.file_path,
+            current.start_line,
+            current.end_line,
+            current.language_kind,
+            current.framework_kind,
+            tuple(attrs.items()),
+        )
 
 
-def _page_source_unit(
-    entities: dict[str, Entity], path: str
-) -> Entity | None:
+def _page_source_unit(entities: dict[str, Entity], path: str) -> Entity | None:
     matches = [
         item
         for item in entities.values()
@@ -1768,9 +1786,7 @@ class NuxtFrameworkAdapter:
                     HANDLER_RULE,
                 )
             elif handlers:
-                issues.append(
-                    AdapterDiagnostic("nuxt_handler_unresolved", path, line)
-                )
+                issues.append(AdapterDiagnostic("nuxt_handler_unresolved", path, line))
 
         # --- runtimeConfig keys (no values) ---
         config_entities: dict[str, Entity] = {}
@@ -1782,9 +1798,7 @@ class NuxtFrameworkAdapter:
             }:
                 continue
             for key, boundary, line in _runtime_keys(module):
-                entity_id = configuration_id(
-                    context.repository_id, "runtime", "", key
-                )
+                entity_id = configuration_id(context.repository_id, "runtime", "", key)
                 entity = Entity(
                     entity_id,
                     context.repository_id,
@@ -1981,9 +1995,7 @@ class NuxtFrameworkAdapter:
                     matches = component_index.get(name, [])
                     # Prefer SourceUnit over Type when both indexed.
                     units = [
-                        item
-                        for item in matches
-                        if item.type == EntityType.SOURCE_UNIT
+                        item for item in matches if item.type == EntityType.SOURCE_UNIT
                     ]
                     targets = units if units else matches
                     unique = {item.id: item for item in targets}
@@ -2043,9 +2055,7 @@ class NuxtFrameworkAdapter:
             source = _page_source_unit(entities, path)
             if source is None:
                 continue
-            handler = _ensure_page_handler(
-                context, entities, edges, source, path
-            )
+            handler = _ensure_page_handler(context, entities, edges, source, path)
             line = endpoint.start_line or 1
             base_attrs = [
                 (key, value)

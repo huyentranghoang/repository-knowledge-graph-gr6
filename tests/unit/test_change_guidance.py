@@ -40,3 +40,39 @@ def test_change_questions_resolve_language_without_identifier_interference():
     assert effective_language("sua code cho checkout", "en") == "vi"
     assert effective_language("Where should I add a new endpoint?", "vi") == "en"
     assert effective_language("Modify `app.them.sua` code", "vi") == "en"
+
+
+@pytest.mark.parametrize(
+    "question,kind,name,qualified",
+    [
+        (
+            "Thêm API trong nhóm orders ở đâu?",
+            "Type",
+            "OrderController",
+            "api.OrderController",
+        ),
+        (
+            "Sửa request cập nhật phía frontend ở đâu?",
+            "Callable",
+            "updateInventory",
+            "client.InventoryApi.updateInventory",
+        ),
+        (
+            "Sửa xử lý job gửi email ở đâu?",
+            "Callable",
+            "processEmailJob",
+            "workers.processEmailJob",
+        ),
+        ("Sửa luồng xóa projection cũ ở đâu?", "Callable", "Run", "app.Cleanup.Run"),
+    ],
+)
+def test_feature_hint_requires_unique_real_catalog_entry(
+    question, kind, name, qualified
+):
+    from rkg.conversations.change_guidance import feature_reference
+
+    entry = {"name": name, "qualified_name": qualified, "type": kind, "path": None}
+    assert feature_reference(question, []) == ()
+    assert feature_reference(question, [entry]) == (qualified,)
+    other = entry | {"qualified_name": "another." + qualified}
+    assert feature_reference(question, [entry, other]) == ()
